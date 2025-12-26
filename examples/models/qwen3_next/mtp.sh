@@ -1,4 +1,4 @@
-# 8 * 60GiB, 10s/it
+# 8 * 60GiB, 8s/it
 
 PYTORCH_CUDA_ALLOC_CONF='expandable_segments:True' \
 NPROC_PER_NODE=8 \
