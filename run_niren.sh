@@ -1,0 +1,22 @@
+swift sft \
+    --model /mtc/baishihao/niren \
+    --train_type full \
+    --dataset '/mtc/baishihao/ms-swift/data_messages_3w_messages.jsonl' \
+    --torch_dtype bfloat16 \
+    --num_train_epochs 3 \
+    --per_device_train_batch_size 4 \
+    --per_device_eval_batch_size 4 \
+    --learning_rate 1e-4 \
+    --gradient_accumulation_steps 16 \
+    --eval_steps 50 \
+    --save_steps 50 \
+    --save_total_limit 2 \
+    --logging_steps 5 \
+    --max_length 16384 \
+    --output_dir ./niren_output \
+    --warmup_ratio 0.05 \
+    --dataloader_num_workers 20 \
+    --model_author shihaobai \
+    --use_logits_to_keep false \
+    --save_total_limit 2 \
+    --model_name niren --model_type mistral_with_mtp --template mistral_niren

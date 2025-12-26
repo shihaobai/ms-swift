@@ -282,7 +282,7 @@ register_model(
         ignore_patterns=[],
     ))
 
-class MistralMTPBlock(GradientCheckpointingLayer):
+class MistralMTPBlock(nn.Module):
     def __init__(self, config: MistralConfig):
         super().__init__()
         self.post_attention_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -295,7 +295,7 @@ class MistralMTPBlock(GradientCheckpointingLayer):
         hidden_states = residual + hidden_states
         return hidden_states
 
-class MistralMTP(GradientCheckpointingLayer):
+class MistralMTP(nn.Module):
     def __init__(self, config: MistralConfig):
         super().__init__()
         mtp_num_layers = config.mtp_num_layers if hasattr(config, 'mtp_num_layers') else 1
@@ -315,6 +315,7 @@ class MistralMTP(GradientCheckpointingLayer):
         hidden_states = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
         )
+
         for layer in self.layers:
             hidden_states = layer(hidden_states)
         return hidden_states
@@ -356,18 +357,18 @@ class MistralForCausalLMWithMTP(MistralForCausalLM):
         >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
-        outputs: BaseModelOutputWithPast = self.model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            position_ids=position_ids,
-            past_key_values=past_key_values,
-            inputs_embeds=inputs_embeds,
-            use_cache=use_cache,
-            cache_position=cache_position,
-            **kwargs,
-        )
-
-        hidden_states = outputs.last_hidden_state
+        with torch.no_grad():
+            outputs: BaseModelOutputWithPast = self.model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                cache_position=cache_position,
+                **kwargs,
+            )
+            hidden_states = outputs.last_hidden_state
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         # slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
 
@@ -377,12 +378,15 @@ class MistralForCausalLMWithMTP(MistralForCausalLM):
         # logits: [batch_size, seq_len, vocab_size]
         # labels: [batch_size, seq_len]
         # labels的 -100 是mask的含义
-        loss = None
-        input_ids = input_ids[:, 1:].contiguous()
-        hidden_states = hidden_states[:, :-1]
-        labels = labels[:, 1:].contiguous()
-        inputs_embeds = self.model.embed_tokens(input_ids)
-        mtp_hidden_states = self.mtp(previous_hidden_states=hidden_states.detach().requires_grad_(True), inputs_embeds=inputs_embeds.detach().requires_grad_(True))
+        with torch.no_grad():
+            loss = None
+            input_ids = input_ids[:, 1:].contiguous()
+            hidden_states = hidden_states[:, :-1]
+            labels = labels[:, 1:].contiguous()
+            inputs_embeds = self.model.embed_tokens(input_ids)
+        hidden_states = hidden_states.requires_grad_(True)
+        inputs_embeds = inputs_embeds.requires_grad_(True)
+        mtp_hidden_states = self.mtp(previous_hidden_states=hidden_states, inputs_embeds=inputs_embeds)
         mtp_hidden_states = self.model.norm(mtp_hidden_states)
         mtp_logits = self.lm_head(mtp_hidden_states)
         # print(mtp_logits.shape, labels.shape, labels.max(), labels.min())
