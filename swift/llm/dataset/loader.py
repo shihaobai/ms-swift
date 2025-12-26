@@ -523,6 +523,7 @@ def load_dataset(
         dataset_syntax = DatasetSyntax.parse(dataset)
         use_hf = dataset_syntax.use_hf or use_hf_default
         # compat dataset_name
+        print(f"dataset_syntax.dataset: {dataset_syntax.dataset_type}")
         if dataset_syntax.dataset in DATASET_MAPPING:
             dataset_meta = DATASET_MAPPING[dataset_syntax.dataset]
             if dataset_syntax.use_hf is None and dataset_meta.dataset_path is not None:

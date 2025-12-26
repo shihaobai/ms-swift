@@ -79,6 +79,7 @@ class LLMTemplateType:
 
     mistral_nemo = 'mistral_nemo'
     mistral_2501 = 'mistral_2501'
+    mistral_niren = 'mistral_niren'
     devstral = 'devstral'
     zephyr = 'zephyr'
     wizardlm2 = 'wizardlm2'

@@ -116,6 +116,23 @@ def freeze_parameters(model: nn.Module,
             if pattern.search(n):
                 p.requires_grad = False
 
+def zero_grad_hook(grad):
+    return torch.zeros_like(grad)
+
+def freeze_parameters_for_mtp(model: nn.Module) -> None:
+    for n, p in model.named_parameters():
+        if 'mtp' not in n:
+            p.requires_grad = False
+        if "lm_head" in n:
+            p.requires_grad = True
+            p.register_hook(zero_grad_hook)
+        if "model.norm" in n:
+            p.requires_grad = True
+            p.register_hook(zero_grad_hook)
+    trainable_params = [n for n, p in model.named_parameters() if p.requires_grad]
+    print(f"Trainable parameters: {trainable_params}")
+    if len(trainable_params) == 0:
+        raise ValueError("No trainable parameters found! Check your freeze logic.")
 
 def activate_parameters(model: nn.Module,
                         additional_trainable_parameters: List[str],

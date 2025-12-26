@@ -9,6 +9,20 @@ from ..model_arch import ModelArch
 from ..register import (Model, ModelGroup, ModelMeta, get_model_tokenizer_multimodal,
                         get_model_tokenizer_with_flash_attn, register_model)
 from ..utils import ModelInfo, safe_snapshot_download
+import torch
+from typing import Optional, Union
+from transformers import (
+    MistralConfig,
+    MistralForCausalLM,
+    GradientCheckpointingLayer,
+)
+from transformers.cache_utils import Cache
+from transformers.utils import TransformersKwargs, auto_docstring, can_return_tuple
+from transformers.models.mistral.modeling_mistral import MistralMLP, MistralRMSNorm
+from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
+from transformers.processing_utils import Unpack
+import torch
+import torch.nn as nn
 
 register_model(
     ModelMeta(
@@ -266,4 +280,146 @@ register_model(
         requires=['transformers>=5.0.0.dev0', 'mistral-common>=1.8.6'],
         tags=['vision'],
         ignore_patterns=[],
+    ))
+
+class MistralMTPBlock(GradientCheckpointingLayer):
+    def __init__(self, config: MistralConfig):
+        super().__init__()
+        self.post_attention_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.mlp = MistralMLP(config)
+    
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        residual = hidden_states
+        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states
+
+class MistralMTP(GradientCheckpointingLayer):
+    def __init__(self, config: MistralConfig):
+        super().__init__()
+        mtp_num_layers = config.mtp_num_layers if hasattr(config, 'mtp_num_layers') else 1
+        self.enorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.hnorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.layers = nn.ModuleList([MistralMTPBlock(config) for _ in range(mtp_num_layers)])
+    
+    def forward(
+        self,
+        previous_hidden_states: torch.Tensor,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert inputs_embeds is not None
+        inputs_embeds = self.enorm(inputs_embeds)
+        previous_hidden_states = self.hnorm(previous_hidden_states)
+        hidden_states = self.eh_proj(
+            torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
+        )
+        for layer in self.layers:
+            hidden_states = layer(hidden_states)
+        return hidden_states
+
+class MistralForCausalLMWithMTP(MistralForCausalLM):
+    def __init__(self, config):
+        super().__init__(config)
+        self.mtp = MistralMTP(config)
+
+    @can_return_tuple
+    @auto_docstring
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[Cache] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+        logits_to_keep: Union[int, torch.Tensor] = 0,
+        **kwargs: Unpack[TransformersKwargs],
+    ) -> CausalLMOutputWithPast:
+        r"""
+        Example:
+
+        ```python
+        >>> from transformers import AutoTokenizer, MistralForCausalLM
+
+        >>> model = MistralForCausalLM.from_pretrained("meta-mistral/Mistral-2-7b-hf")
+        >>> tokenizer = AutoTokenizer.from_pretrained("meta-mistral/Mistral-2-7b-hf")
+
+        >>> prompt = "Hey, are you conscious? Can you talk to me?"
+        >>> inputs = tokenizer(prompt, return_tensors="pt")
+
+        >>> # Generate
+        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
+        ```"""
+        outputs: BaseModelOutputWithPast = self.model(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            **kwargs,
+        )
+
+        hidden_states = outputs.last_hidden_state
+        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
+        # slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+
+        # logits = self.lm_head(hidden_states[:, slice_indices, :])
+        # import ipdb; ipdb.set_trace()
+        # input_ids: [batch_size, seq_len]
+        # logits: [batch_size, seq_len, vocab_size]
+        # labels: [batch_size, seq_len]
+        # labels的 -100 是mask的含义
+        loss = None
+        input_ids = input_ids[:, 1:].contiguous()
+        hidden_states = hidden_states[:, :-1]
+        labels = labels[:, 1:].contiguous()
+        inputs_embeds = self.model.embed_tokens(input_ids)
+        mtp_hidden_states = self.mtp(previous_hidden_states=hidden_states.detach().requires_grad_(True), inputs_embeds=inputs_embeds.detach().requires_grad_(True))
+        mtp_hidden_states = self.model.norm(mtp_hidden_states)
+        mtp_logits = self.lm_head(mtp_hidden_states)
+        # print(mtp_logits.shape, labels.shape, labels.max(), labels.min())
+        if labels is not None:
+            loss = self.loss_function(logits=mtp_logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+
+        return CausalLMOutputWithPast(
+            loss=loss,
+            logits=mtp_logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=mtp_hidden_states,
+            attentions=outputs.attentions,
+        )
+
+def get_model_tokenizer_mistral_with_mtp(model_dir: str,
+                                  model_info: ModelInfo,
+                                  model_kwargs: Dict[str, Any],
+                                  load_model: bool = True,
+                                  **kwargs):
+    kwargs['automodel_class'] = MistralForCausalLMWithMTP
+    return get_model_tokenizer_with_flash_attn(model_dir, model_info, model_kwargs, load_model, **kwargs)
+
+register_model(
+    ModelMeta(
+        model_type=LLMModelType.mistral_with_mtp,            # 在 constant.py 中先加枚举
+        model_groups=[
+            ModelGroup([
+                Model('AI-ModelScope/Mistral-7B-Instruct-v0.1', 'mistralai/Mistral-7B-Instruct-v0.1'),
+                Model('AI-ModelScope/Mistral-7B-Instruct-v0.2', 'mistralai/Mistral-7B-Instruct-v0.2'),
+                Model('LLM-Research/Mistral-7B-Instruct-v0.3', 'mistralai/Mistral-7B-Instruct-v0.3'),
+                Model('AI-ModelScope/Mistral-7B-v0.1', 'mistralai/Mistral-7B-v0.1'),
+                Model('AI-ModelScope/Mistral-7B-v0.2-hf', 'alpindale/Mistral-7B-v0.2-hf'),
+            ]),
+        ],
+        template=TemplateType.mistral_niren,           
+        get_function=get_model_tokenizer_mistral_with_mtp,  
+        architectures=['MistralForCausalLMWithMTP'],       
+        model_arch=ModelArch.llama,                   
+        requires=['transformers>=4.49']               
     ))

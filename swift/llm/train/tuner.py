@@ -12,7 +12,7 @@ from transformers import TrainingArguments
 from swift.llm import TrainArguments, deep_getattr
 from swift.plugin import Tuner, extra_tuners
 from swift.tuners import Swift
-from swift.utils import activate_parameters, find_all_linears, find_embedding, find_norm, freeze_parameters, get_logger
+from swift.utils import activate_parameters, find_all_linears, find_embedding, find_norm, freeze_parameters, freeze_parameters_for_mtp, get_logger
 
 logger = get_logger()
 
@@ -406,6 +406,7 @@ class TunerMixin:
             model.requires_grad_(True)
 
             freeze_parameters(model, args.freeze_parameters_ratio, args.freeze_parameters, args.freeze_parameters_regex)
+            freeze_parameters_for_mtp(model)
             if args.trainable_parameters or args.trainable_parameters_regex:
                 activate_parameters(model, args.trainable_parameters, args.trainable_parameters_regex)
         else:

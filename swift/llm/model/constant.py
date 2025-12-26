@@ -90,6 +90,7 @@ class LLMModelType:
     telechat2 = 'telechat2'
 
     mistral = 'mistral'
+    mistral_with_mtp = 'mistral_with_mtp'
     devstral = 'devstral'
     zephyr = 'zephyr'
     mixtral = 'mixtral'

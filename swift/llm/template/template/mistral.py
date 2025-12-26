@@ -200,3 +200,9 @@ register_template(
         default_system=None,
         template_cls=Mistral2512ThinkingTemplate,
         agent_template='mistral'))
+
+register_template(
+    TemplateMeta(
+        LLMTemplateType.mistral_niren, [''], ['<|im_start|>user\n<|text|>{{QUERY}}<|endofblock|><|im_end|>\n<|im_start|>assistant\n<|text|>'], ['<|endofblock|><|im_end|>\n'], ['<|endofblock|><|im_end|>'],
+        default_system="You are a helpful assistant.",
+        system_prefix=['<|im_start|>system\n<|text|>{{SYSTEM}}<|endofblock|><|im_end|>\n']))

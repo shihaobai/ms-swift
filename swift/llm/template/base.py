@@ -1071,7 +1071,6 @@ class Template(ProcessorMixin):
         template_meta = self.template_meta
         self._swift_prepare_inputs(inputs)
         system = self._get_system(inputs)
-
         self._get_std_messages(inputs.messages)
         n_round = len(inputs.messages) // 2
         if n_round > 1 and not self.template_meta.support_multi_round:
