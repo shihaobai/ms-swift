@@ -381,17 +381,24 @@ class MistralForCausalLMWithMTP(MistralForCausalLM):
         with torch.no_grad():
             loss = None
             input_ids = input_ids[:, 1:].contiguous()
-            hidden_states = hidden_states[:, :-1]
-            labels = labels[:, 1:].contiguous()
+            input_hidden_states = hidden_states[:, :-1]
+            next_hidden_states = hidden_states[:, 1:]
+            next_hidden_logics = self.lm_head(next_hidden_states)
+            next_target = torch.argmax(next_hidden_logics, dim=2, keepdim=False)
+            labels = torch.nn.functional.pad(labels[:, 2:], pad=(0, 1), value=-100)
             inputs_embeds = self.model.embed_tokens(input_ids)
-        hidden_states = hidden_states.requires_grad_(True)
+
+        input_hidden_states = input_hidden_states.requires_grad_(True)
         inputs_embeds = inputs_embeds.requires_grad_(True)
-        mtp_hidden_states = self.mtp(previous_hidden_states=hidden_states, inputs_embeds=inputs_embeds)
+        mtp_hidden_states = self.mtp(previous_hidden_states=input_hidden_states, inputs_embeds=inputs_embeds)
         mtp_hidden_states = self.model.norm(mtp_hidden_states)
         mtp_logits = self.lm_head(mtp_hidden_states)
         # print(mtp_logits.shape, labels.shape, labels.max(), labels.min())
         if labels is not None:
-            loss = self.loss_function(logits=mtp_logits, labels=labels, vocab_size=self.config.vocab_size, **kwargs)
+            mtp_logits = mtp_logits[labels != -100, :]
+            next_target = next_target[labels != -100]
+            cross = nn.CrossEntropyLoss()
+            loss = cross(mtp_logits.view(-1, self.config.vocab_size), next_target.view(-1))
 
         return CausalLMOutputWithPast(
             loss=loss,
